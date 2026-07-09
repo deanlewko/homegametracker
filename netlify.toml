@@ -1,0 +1,13 @@
+[build]
+  publish = "outputs"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/"
+  to = "/poker-pot-tracker.html"
+  status = 200
+
+[[redirects]]
+  from = "/admin"
+  to = "/admin.html"
+  status = 200
