@@ -1,6 +1,6 @@
 [build]
-  publish = "outputs"
-  functions = "netlify/functions"
+  publish = "poker-pot-tracker-git-upload-cash-pot/outputs"
+  functions = "poker-pot-tracker-git-upload-cash-pot/netlify/functions"
 
 [[redirects]]
   from = "/"
@@ -10,4 +10,9 @@
 [[redirects]]
   from = "/admin"
   to = "/admin.html"
+  status = 200
+
+[[redirects]]
+  from = "/:sessionDate"
+  to = "/poker-pot-tracker.html"
   status = 200
