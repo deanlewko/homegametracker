@@ -676,8 +676,12 @@
       </div>
       <input type="hidden" id="quickPlayerId">
       <input type="hidden" id="quickType">
+      <div class="quick-amounts" id="quickBuyInAmounts" aria-label="Quick buy-in amounts">
+        <button type="button" data-quick-amount="50">$50</button>
+        <button type="button" data-quick-amount="100">$100</button>
+      </div>
       <label>
-        Amount
+        <span id="quickAmountLabel">Custom amount</span>
         <input id="quickAmount" inputmode="decimal" type="number" min="0" step="0.01" required>
       </label>
       <div class="modal-actions">
@@ -722,12 +726,8 @@
           Paid by
           <select id="cashPayer" required></select>
         </label>
-        <div class="quick-amounts" aria-label="Quick cash amounts">
-          <button type="button" data-cash-amount="50">$50</button>
-          <button type="button" data-cash-amount="100">$100</button>
-        </div>
         <label>
-          Custom amount
+          Amount
           <input id="cashAmount" inputmode="decimal" type="number" min="0.01" step="0.01" placeholder="Enter amount" required>
         </label>
       </div>
@@ -798,6 +798,8 @@
       quickSubtitle: document.querySelector("#quickSubtitle"),
       quickPlayerId: document.querySelector("#quickPlayerId"),
       quickType: document.querySelector("#quickType"),
+      quickBuyInAmounts: document.querySelector("#quickBuyInAmounts"),
+      quickAmountLabel: document.querySelector("#quickAmountLabel"),
       quickAmount: document.querySelector("#quickAmount"),
       bulkDialog: document.querySelector("#bulkDialog"),
       bulkForm: document.querySelector("#bulkForm"),
@@ -1257,6 +1259,8 @@
       els.quickAmount.value = "";
       els.quickTitle.textContent = type === "buyIn" ? "Add buy-in" : "Add cash-out";
       els.quickSubtitle.textContent = player.name;
+      els.quickBuyInAmounts.hidden = type !== "buyIn";
+      els.quickAmountLabel.textContent = type === "buyIn" ? "Custom amount" : "Amount";
       els.quickDialog.showModal();
       window.setTimeout(() => els.quickAmount.focus(), 50);
     }
@@ -1745,9 +1749,9 @@
     els.cashForm.addEventListener("submit", submitCashPayment);
     els.endSessionForm.addEventListener("submit", submitCashRecipients);
     els.deletePlayerBtn.addEventListener("click", deletePlayer);
-    document.querySelectorAll("[data-cash-amount]").forEach((button) => {
+    document.querySelectorAll("[data-quick-amount]").forEach((button) => {
       button.addEventListener("click", () => {
-        els.cashAmount.value = button.dataset.cashAmount;
+        els.quickAmount.value = button.dataset.quickAmount;
       });
     });
     els.bulkNames.addEventListener("input", renderBulkMatches);
