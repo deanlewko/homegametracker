@@ -1752,6 +1752,7 @@
     document.querySelectorAll("[data-quick-amount]").forEach((button) => {
       button.addEventListener("click", () => {
         els.quickAmount.value = button.dataset.quickAmount;
+        els.quickForm.requestSubmit();
       });
     });
     els.bulkNames.addEventListener("input", renderBulkMatches);
