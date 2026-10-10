@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <meta name="referrer" content="no-referrer">
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Home Game Poker Pot Tracker</title>
@@ -131,7 +132,7 @@
       top: 0;
       z-index: 10;
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 8px;
       margin: 0 -16px 14px;
       padding: 10px 16px;
@@ -549,6 +550,9 @@
         padding-inline: 24px;
       }
     }
+    .transaction-row { padding: 14px 0; border-bottom: 1px solid rgba(150,150,150,.25); overflow-wrap: anywhere; }
+    .transaction-row .subtle { margin-bottom: 4px; }
+    .settlement-card a.secondary { display: block; text-align: center; padding: 12px; text-decoration: none; margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -584,10 +588,12 @@
 
     <nav class="toolbar" aria-label="Primary actions">
       <button class="primary" id="addPlayerBtn" type="button">Add player</button>
+      <button class="secondary" id="shareGameBtn" type="button">Share live game</button>
       <button class="secondary" id="bulkAddBtn" type="button">Bulk names</button>
       <button class="secondary" id="endSessionBtn" type="button">End session</button>
     </nav>
 
+    <p id="gameAccess" class="hint" role="status">Host · Changes save automatically</p>
     <main>
       <section aria-labelledby="playersTitle">
         <div class="section-head">
@@ -620,6 +626,10 @@
         </div>
         <div class="settlement-list" id="settlementList"></div>
       </section>
+      <section aria-labelledby="historyTitle">
+        <div class="section-head"><div><h2 id="historyTitle">Transaction history</h2><div class="hint">Oldest first · Every change is recorded automatically.</div></div></div>
+        <div id="transactionHistory" aria-live="polite"></div>
+      </section>
     </main>
   </div>
 
@@ -637,6 +647,10 @@
         <label>
           Name
           <input id="playerName" autocomplete="name" required>
+        </label>
+        <label>
+          Beem username
+          <input id="playerBeem" placeholder="username (without @)" autocomplete="off">
         </label>
         <label>
           PayID
@@ -763,7 +777,12 @@
     const LEGACY_STORAGE_KEY = "home-poker-pot-tracker-v1";
     const TAB_STARTED_KEY = "home-poker-pot-tracker-tab-started";
     const dollars = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" });
+    const requestedGame = new URLSearchParams(location.search).get("game");
     const state = loadState();
+    let hostToken = "", revision = 0, pending = false, syncing = false, ready = false, conflict = false;
+    let viewer = Boolean(requestedGame);
+    let auditBaseline;
+    let saveTimer;
 
     const els = {
       sessionName: document.querySelector("#sessionName"),
@@ -817,7 +836,7 @@
     };
 
     function loadState() {
-      const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+      const saved = localStorage.getItem(requestedGame ? `${STORAGE_KEY}:${requestedGame}` : STORAGE_KEY) || (!requestedGame && localStorage.getItem(LEGACY_STORAGE_KEY));
       if (saved) {
         try {
           return normalizeState(JSON.parse(saved));
@@ -827,6 +846,7 @@
       }
 
       return normalizeState({
+        sessionId: requestedGame || crypto.randomUUID(),
         sessionName: "Friday home game",
         players: []
       });
@@ -851,8 +871,8 @@
     function updateSessionUrl(slug = sessionDateSlug()) {
       if (!["http:", "https:"].includes(window.location.protocol)) return;
       const nextPath = sessionUrlPath(slug);
-      if (window.location.pathname === nextPath) return;
-      window.history.pushState({}, "", nextPath);
+      if (window.location.pathname === nextPath && new URLSearchParams(location.search).get("game") === state.sessionId) return;
+      window.history.replaceState({}, "", `${nextPath}?game=${encodeURIComponent(state.sessionId)}`);
     }
 
     function normalizeState(nextState) {
@@ -865,6 +885,7 @@
         players: Array.isArray(nextState.players) ? nextState.players.map(normalizePlayer) : [],
         cashPayments: Array.isArray(nextState.cashPayments) ? nextState.cashPayments.map(normalizeCashPayment) : [],
         playerDirectory: nextState.playerDirectory || {},
+        transactions: Array.isArray(nextState.transactions) ? nextState.transactions : [],
         pastSessions: []
       };
     }
@@ -873,6 +894,7 @@
       return {
         id: player.id || crypto.randomUUID(),
         name: player.name || "",
+        beemHandle: player.beemHandle || "",
         payId: player.payId || "",
         contactDetails: player.contactDetails || "",
         buyIn: amount(player.buyIn),
@@ -891,14 +913,166 @@
       };
     }
 
-    function saveState() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      els.saveStatus.textContent = "Saved";
+    function persistLocal() {
+      if (viewer) return;
+      try {
+        const serialized = JSON.stringify(state);
+        localStorage.setItem(`${STORAGE_KEY}:${state.sessionId}`, serialized);
+        localStorage.setItem(STORAGE_KEY, serialized);
+      } catch { els.saveStatus.textContent = "Storage full — keep this tab open"; }
+    }
+
+    function saveState() { persistLocal(); }
+
+    function captureTransactions() {
+      const before = auditBaseline;
+      if (!before) { auditBaseline = structuredClone(state); return; }
+      const record = (text) => state.transactions.push({id: crypto.randomUUID(), at: new Date().toISOString(), text});
+      for (const player of state.players) {
+        const old = before.players.find(p => p.id === player.id);
+        if (!old) {
+          record(`${player.name} bought in for ${formatAmount(player.buyIn)}`);
+          if (player.cashOut > 0) record(`${player.name} cashed out ${formatAmount(player.cashOut)}`);
+        }
+        else {
+          const added = roundMoney(player.buyIn - old.buyIn);
+          const paid = roundMoney(player.cashOut - old.cashOut);
+          if (added > 0) record(`${player.name} added on for ${formatAmount(added)} (total ${formatAmount(player.buyIn)})`);
+          if (added < 0) record(`${player.name}'s buy-in corrected from ${formatAmount(old.buyIn)} to ${formatAmount(player.buyIn)}`);
+          if (paid > 0) record(`${player.name} cashed out ${formatAmount(paid)} (total ${formatAmount(player.cashOut)})`);
+          if (paid < 0) record(`${player.name}'s cash-out corrected from ${formatAmount(old.cashOut)} to ${formatAmount(player.cashOut)}`);
+          if (old.name !== player.name) record(`${old.name} renamed to ${player.name}`);
+          if (old.payId !== player.payId || old.contactDetails !== player.contactDetails || old.beemHandle !== player.beemHandle) record(`${player.name}'s payment details updated`);
+          if (old.cashEligible !== player.cashEligible || old.cashPreferred !== player.cashPreferred) record(`${player.name}'s cash payout preference updated`);
+        }
+      }
+      before.players.filter(old => !state.players.some(p => p.id === old.id)).forEach(old => record(`${old.name} removed (buy-in ${formatAmount(old.buyIn)}, cash-out ${formatAmount(old.cashOut)})`));
+      state.cashPayments.filter(p => !before.cashPayments.some(old => old.id === p.id)).forEach(p => record(`${playerName(p.fromId)} paid ${formatAmount(p.amount)} physical cash into the pot`));
+      before.cashPayments.filter(p => !state.cashPayments.some(next => next.id === p.id)).forEach(p => record(`Physical cash entry removed: ${before.players.find(player => player.id === p.fromId)?.name || "Player"}, ${formatAmount(p.amount)}`));
+      if (before.sessionEnded !== state.sessionEnded) record(state.sessionEnded ? "Session ended · settlement ready" : "Session reopened for edits");
+      if (before.sessionName !== state.sessionName) record(`Game renamed to ${state.sessionName}`);
+      auditBaseline = structuredClone(state);
     }
 
     function dirtySave() {
-      els.saveStatus.textContent = "Saving...";
-      window.setTimeout(saveState, 80);
+      if (viewer || !ready || conflict) return;
+      captureTransactions();
+      persistLocal();
+      pending = true;
+      els.saveStatus.textContent = "Saved on device · syncing…";
+      renderHistory();
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(syncGame, 350);
+    }
+
+    function renderHistory() {
+      const list = document.querySelector("#transactionHistory");
+      list.replaceChildren();
+      if (!state.transactions.length) { list.textContent = "New transactions will appear here."; return; }
+      state.transactions.forEach(entry => {
+        const row = document.createElement("article");
+        row.className = "transaction-row";
+        const time = document.createElement("div");
+        time.className = "subtle";
+        time.textContent = new Date(entry.at).toLocaleString("en-AU");
+        const description = document.createElement("div");
+        description.textContent = entry.text;
+        row.append(time, description);
+        list.append(row);
+      });
+    }
+
+    function applyAccess() {
+      const locked = viewer || !ready || conflict;
+      document.querySelectorAll(".toolbar button, #newSessionBtn, #recordCashBtn, #playerList button, #cashPaymentList button").forEach(button => {
+        if (button.id !== "shareGameBtn") button.disabled = locked || (button.id === "recordCashBtn" && (state.sessionEnded || !state.players.length));
+      });
+      els.sessionName.readOnly = locked;
+      document.querySelector("#gameAccess").textContent = conflict ? "Another host tab saved changes. Your edits are backed up on this device; reload to use the shared version." : viewer ? "Viewing live game · Only the host can edit" : "Host · Changes save automatically · Share the link so players can watch";
+    }
+
+    async function syncGame() {
+      if (!ready || viewer || syncing || !pending || conflict) return;
+      syncing = true;
+      pending = false;
+      const gameId = state.sessionId;
+      const snapshot = structuredClone(state);
+      delete snapshot.playerDirectory;
+      delete snapshot.pastSessions;
+      try {
+        const response = await fetch("/.netlify/functions/live-game", {method:"POST", headers:{"Content-Type":"application/json", "Authorization":`Bearer ${hostToken}`}, body:JSON.stringify({id:gameId, revision, state:snapshot})});
+        const result = await response.json();
+        if (response.status === 409) {
+          localStorage.setItem(`${STORAGE_KEY}:conflict:${gameId}:${Date.now()}`, JSON.stringify(snapshot));
+          conflict = true;
+          els.saveStatus.textContent = "Save conflict · reload required";
+          applyAccess();
+          return;
+        }
+        if (!response.ok) throw new Error(result.error || "Save failed");
+        if (state.sessionId !== gameId) return;
+        revision = result.revision;
+        localStorage.setItem(`poker-revision:${gameId}`, String(revision));
+        els.saveStatus.textContent = pending ? "Saved on device · syncing…" : "Saved online";
+      } catch {
+        if (state.sessionId === gameId) { pending = true; els.saveStatus.textContent = "Saved on device · waiting for connection"; }
+      } finally {
+        syncing = false;
+        if (pending && !conflict) saveTimer = setTimeout(syncGame, 3000);
+      }
+    }
+
+    async function refreshViewer() {
+      if (!viewer || document.hidden) return;
+      try {
+        const response = await fetch(`/.netlify/functions/live-game?id=${encodeURIComponent(state.sessionId)}`, {cache:"no-store"});
+        if (response.status === 404) { els.saveStatus.textContent = "Game not found · check the shared link"; return; }
+        if (!response.ok) throw new Error("Unavailable");
+        const result = await response.json();
+        Object.assign(state, normalizeState(result.state));
+        revision = result.revision;
+        render();
+        els.saveStatus.textContent = "Live · updated " + new Date().toLocaleTimeString("en-AU", {hour:"2-digit",minute:"2-digit"});
+      } catch { els.saveStatus.textContent = "Reconnecting…"; }
+    }
+
+    async function initializeGame() {
+      hostToken = localStorage.getItem(`poker-host:${state.sessionId}`) || "";
+      viewer = Boolean(requestedGame && !hostToken);
+      if (!viewer && !hostToken) {
+        hostToken = crypto.randomUUID() + crypto.randomUUID();
+        localStorage.setItem(`poker-host:${state.sessionId}`, hostToken);
+      }
+      revision = Number(localStorage.getItem(`poker-revision:${state.sessionId}`) || 0);
+      render();
+      if (viewer) {
+        ready = true;
+        await refreshViewer();
+        applyAccess();
+        return;
+      }
+      try {
+        const response = await fetch(`/.netlify/functions/live-game?id=${encodeURIComponent(state.sessionId)}`, {headers:{Authorization:`Bearer ${hostToken}`},cache:"no-store"});
+        if (response.ok) {
+          const remote = await response.json();
+          if (remote.revision !== revision) {
+            localStorage.setItem(`${STORAGE_KEY}:recovery:${state.sessionId}:${Date.now()}`, JSON.stringify(state));
+            const directory = state.playerDirectory;
+            Object.assign(state, normalizeState(remote.state));
+            state.playerDirectory = directory;
+            revision = remote.revision;
+            localStorage.setItem(`poker-revision:${state.sessionId}`, String(revision));
+          }
+        } else if (response.status !== 404) throw new Error("Connection failed");
+      } catch { els.saveStatus.textContent = "Saved on device · waiting for connection"; }
+      ready = true;
+      if (!state.transactions.length && state.players.length) state.transactions.push({id:crypto.randomUUID(),at:new Date().toISOString(),text:"Existing game restored. Earlier individual transactions were not recorded."});
+      auditBaseline = structuredClone(state);
+      persistLocal();
+      pending = true;
+      render();
+      updateSessionUrl(state.sessionSlug);
+      await syncGame();
     }
 
     function amount(value) {
@@ -977,6 +1151,7 @@
         id: state.sessionId,
         sessionSlug: state.sessionSlug || sessionDateSlug(),
         sessionName: state.sessionName || "Home game",
+        transactions: state.transactions,
         finishedAt: new Date().toISOString(),
         players: state.players.map((player) => ({
           name: player.name,
@@ -1026,6 +1201,8 @@
       renderPlayers();
       renderCashPayments();
       renderSettlements();
+      renderHistory();
+      applyAccess();
     }
 
     function renderPlayers() {
@@ -1065,8 +1242,8 @@
           card.querySelector(".player-name").textContent = player.name;
           const cashPaid = cashPaidBy(player.id);
           card.querySelector(".cash-paid-line").textContent = cashPaid ? `Cash in pot: ${formatAmount(cashPaid)}` : "";
-          card.querySelector(".payid-line").textContent = player.payId ? `PayID: ${player.payId}` : "No PayID added";
-          card.querySelector(".contact-line").textContent = player.contactDetails ? `Contact: ${player.contactDetails}` : "No contact details";
+          card.querySelector(".payid-line").textContent = viewer ? "" : player.payId ? `PayID: ${player.payId}` : "No PayID added";
+          card.querySelector(".contact-line").textContent = viewer ? "" : player.contactDetails ? `Contact: ${player.contactDetails}` : "No contact details";
           card.querySelectorAll("button").forEach((button) => {
             button.addEventListener("click", () => {
               const action = button.dataset.action;
@@ -1185,16 +1362,29 @@
             <span>${formatAmount(item.amount)}</span>
           </div>
           <div class="pay-box">
-            <div class="subtle">Pay ${item.to.name} using PayID</div>
+            <div class="subtle payment-recipient"></div>
             <code></code>
           </div>
           <button class="secondary" type="button">Copy payment details</button>
         `;
         card.querySelector(".settlement-title span").textContent = `${item.from.name} → ${item.to.name}`;
-        card.querySelector("code").textContent = receiverPayId;
+        card.querySelector(".payment-recipient").textContent = viewer ? `Pay ${item.to.name}` : `Pay ${item.to.name} using PayID`;
+        card.querySelector("code").textContent = viewer ? "PayID details are private to the host" : receiverPayId;
         card.querySelector("button").addEventListener("click", () => {
           copyText(`${item.from.name} pays ${item.to.name} ${formatAmount(item.amount)}\nPayID: ${receiverPayId}`);
         });
+        if (item.to.beemHandle) {
+          const link = document.createElement("a");
+          link.className = "secondary";
+          link.textContent = "Pay with Beem";
+          link.href = `https://www.beem.com.au/app/pay?handle=${encodeURIComponent(item.to.beemHandle)}`;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          const note = document.createElement("div");
+          note.className = "subtle";
+          note.textContent = `Enter ${formatAmount(item.amount)} in Beem. Confirm payment there.`;
+          card.append(link, note);
+        }
         els.settlementList.append(card);
       });
     }
@@ -1235,6 +1425,7 @@
       els.playerDialogTitle.textContent = player ? "Edit player" : "Add player";
       els.playerId.value = player?.id || "";
       els.playerName.value = player?.name || "";
+      document.querySelector("#playerBeem").value = player?.beemHandle || "";
       els.playerPayId.value = player?.payId || "";
       els.playerContact.value = player?.contactDetails || "";
       els.playerBuyIn.value = player?.buyIn || "";
@@ -1413,6 +1604,7 @@
       const nextPlayer = {
         id,
         name: els.playerName.value.trim(),
+        beemHandle: document.querySelector("#playerBeem").value.trim().replace(/^@/, ""),
         payId: els.playerPayId.value.trim(),
         contactDetails: els.playerContact.value.trim(),
         buyIn: amount(els.playerBuyIn.value),
@@ -1709,7 +1901,14 @@
       showToast("Session ended. Transfers are visible.");
     }
 
-    function startFreshSession() {
+    async function startFreshSession() {
+      if (viewer || conflict) return;
+      if (syncing) { showToast("Wait for the current game to finish saving"); return; }
+      if (pending) {
+        clearTimeout(saveTimer);
+        await syncGame();
+        if (pending || conflict) { showToast("Reconnect and save this game before starting another"); return; }
+      }
       archiveCurrentSession();
       state.sessionName = "New home game";
       state.sessionId = crypto.randomUUID();
@@ -1717,6 +1916,11 @@
       state.sessionEnded = false;
       state.players = [];
       state.cashPayments = [];
+      state.transactions = [];
+      auditBaseline = structuredClone(state);
+      hostToken = crypto.randomUUID() + crypto.randomUUID();
+      localStorage.setItem(`poker-host:${state.sessionId}`, hostToken);
+      revision = 0;
       updateSessionUrl(state.sessionSlug);
       dirtySave();
       render();
@@ -1764,9 +1968,21 @@
       button.addEventListener("click", closeDialogs);
     });
 
-    render();
-    saveState();
-    window.setTimeout(promptBulkForNewTab, 120);
+    document.querySelector("#shareGameBtn").addEventListener("click", async () => {
+      if (!viewer) {
+        if (syncing) { showToast("Wait for the game to finish saving, then share"); return; }
+        if (pending) await syncGame();
+        if (pending || conflict || revision === 0) { showToast("Connect and save the game before sharing"); return; }
+      }
+      const url = `${location.origin}/${state.sessionSlug}?game=${encodeURIComponent(state.sessionId)}`;
+      if (navigator.share) { try { await navigator.share({title:state.sessionName,url}); } catch {} }
+      else await copyText(url);
+    });
+    window.addEventListener("pagehide", persistLocal);
+    window.addEventListener("online", () => viewer ? refreshViewer() : syncGame());
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) viewer ? refreshViewer() : syncGame(); });
+    setInterval(() => { if (viewer) refreshViewer(); else if (pending) syncGame(); }, 5000);
+    initializeGame();
   </script>
 </body>
 </html>
