@@ -24,6 +24,8 @@ export function safeAccount(account) {
 }
 export async function paymentProfilesForGame(state, store = profileStore()) {
   const players = await Promise.all(state.players.map(async player => {
+    const payment = await store.get(`payments/${state.sessionId}/${player.id}`,{type:'json'});
+    if (payment) return {...player,payId:payment.payId,beemHandle:payment.beemHandle,paymentProfileLinked:true};
     const link = await store.get(linkKey(state.sessionId,player.id),{type:'json'});
     if (!link) return player;
     const account = await store.get(`accounts/${link.username}`,{type:'json'});
