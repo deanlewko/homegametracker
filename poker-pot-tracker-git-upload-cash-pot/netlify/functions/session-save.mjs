@@ -24,6 +24,7 @@ export default async (request) => {
         cashOut: money(player.cashOut)
       }))
       .filter((player) => player.name),
+    transactions: (Array.isArray(body.transactions) ? body.transactions : []).slice(0,10000),
     cashContributions: (Array.isArray(body.cashContributions) ? body.cashContributions : [])
       .map((payment) => ({
         from: String(payment.from || "").trim().slice(0, 80),
