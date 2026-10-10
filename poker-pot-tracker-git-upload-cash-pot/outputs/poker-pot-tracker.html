@@ -609,34 +609,10 @@
         <div class="section-head">
           <div>
             <h2 id="playersTitle">Players</h2>
-            <div class="hint">Track total buy-in and final cash-out for each person.</div>
+            <div class="hint">Track total buy-in and final cash-out for each person. Click your name to update PayID and Beem details.</div>
           </div>
         </div>
         <div class="player-list" id="playerList"></div>
-      </section>
-
-      <section aria-labelledby="paymentDetailsTitle">
-        <div class="section-head"><div><h2 id="paymentDetailsTitle">Player payment details</h2><div class="hint">Players can sign in and manage their own PayID and Beem account.</div></div></div>
-        <form id="playerAccountForm" class="payment-panel">
-          <div class="account-tabs"><button type="button" class="secondary" id="signInTab" aria-pressed="true">Sign in</button><button type="button" class="secondary" id="registerTab" aria-pressed="false">Create account</button></div>
-          <label id="accountNameLabel" hidden>Your name<input id="accountName" autocomplete="name" maxlength="80"></label>
-          <label>Username<input id="accountUsername" autocomplete="username" pattern="[a-zA-Z0-9_]{3,32}" minlength="3" maxlength="32" required placeholder="e.g. dean_poker"></label>
-          <label>Password<input id="accountPassword" type="password" autocomplete="current-password" minlength="10" maxlength="128" required placeholder="At least 10 characters"></label>
-          <button class="primary" id="accountSubmit" type="submit">Sign in</button>
-          <div class="hint">Choose a username and password you can use on any device.</div>
-        </form>
-        <form id="myPaymentForm" class="payment-panel" hidden>
-          <div class="section-head"><strong id="signedInPlayer"></strong><button id="playerSignOut" type="button" class="secondary">Sign out</button></div>
-          <label>PayID<input id="myPayId" maxlength="160" placeholder="Email, mobile, ABN or organisation ID" autocomplete="off"></label>
-          <label>Beem username<input id="myBeemHandle" maxlength="33" placeholder="username (with or without @)" autocomplete="off"></label>
-          <label>Your player in this game<select id="myGamePlayer"><option value="">Choose your name</option></select></label>
-          <label class="sharing-choice"><input type="checkbox" id="sharePaymentDetails"> Share my PayID and Beem username with players in this game.</label>
-          <button class="primary" id="saveMyPaymentDetails" type="submit">Save my payment details</button>
-          <div class="hint">The host confirms your first connection to a player. Your saved details then appear in that game and you can update them yourself.</div>
-          <div class="hint">Updates apply to every game you have connected this account to.</div>
-        </form>
-        <p id="playerAccountStatus" class="hint" role="status" aria-live="polite"></p>
-        <div id="paymentProfileRequests"></div>
       </section>
 
       <section aria-labelledby="cashTitle">
@@ -804,6 +780,17 @@
     </form>
   </dialog>
 
+  <dialog id="paymentDialog" aria-labelledby="paymentDialogTitle">
+    <form class="modal" id="paymentForm">
+      <h2 id="paymentDialogTitle">Payment details</h2>
+      <p class="hint">Add your details for this game. Anyone with the game link can view and update these payment details.</p>
+      <label>PayID<input id="paymentPayId" maxlength="160" placeholder="Email, mobile, ABN or organisation ID" autocomplete="off"></label>
+      <label>Beem username<input id="paymentBeem" maxlength="33" pattern="@?[a-zA-Z0-9_.-]{1,32}" placeholder="username (with or without @)" autocomplete="off"></label>
+      <p id="paymentStatus" class="hint" role="status" aria-live="polite"></p>
+      <div class="modal-actions"><button class="secondary" type="button" data-close>Cancel</button><button class="primary" id="paymentSave" type="submit">Save details</button></div>
+    </form>
+  </dialog>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script>
@@ -817,9 +804,8 @@
     let viewer = Boolean(requestedGame);
     let auditBaseline;
     let saveTimer;
-    let playerAccount = null, accountMode = "login", paymentBusy = false, paymentRefreshBusy = false;
-    let connectionStatus = "not-connected";
-    let paymentRefreshTimer;
+    let paymentBusy = false, paymentRefreshBusy = false, paymentPlayerId = "", paymentRevision = 0;
+    let paymentOpenRequest = 0;
 
     const els = {
       sessionName: document.querySelector("#sessionName"),
@@ -1022,10 +1008,11 @@
     function applyAccess() {
       const locked = viewer || !ready || conflict;
       document.querySelectorAll(".toolbar button, #newSessionBtn, #recordCashBtn, #playerList button, #cashPaymentList button").forEach(button => {
+        if (button.dataset.action === "payment") { button.disabled = !ready; return; }
         if (button.id !== "shareGameBtn") button.disabled = locked || (button.id === "recordCashBtn" && (state.sessionEnded || !state.players.length));
       });
       els.sessionName.readOnly = locked;
-      document.querySelector("#gameAccess").textContent = conflict ? "Another host tab saved changes. Your edits are backed up on this device; reload to use the shared version." : viewer ? "Viewing live game · Only the host can edit" : "Host · Changes save automatically · Share the link so players can watch";
+      document.querySelector("#gameAccess").textContent = conflict ? "Another host tab saved changes. Your edits are backed up on this device; reload to use the shared version." : viewer ? "Viewing live game · Host edits amounts · Click your name to edit payment details" : "Host · Changes save automatically · Share the link so players can watch";
     }
 
     async function syncGame() {
@@ -1100,6 +1087,11 @@
             revision = remote.revision;
             localStorage.setItem(`poker-revision:${state.sessionId}`, String(revision));
           }
+          // Payment-detail updates do not increment the host's financial revision.
+          remote.state.players.forEach(remotePlayer => {
+            const local = state.players.find(p=>p.id === remotePlayer.id);
+            if (local && remotePlayer.paymentProfileLinked) Object.assign(local,{payId:remotePlayer.payId || '',beemHandle:remotePlayer.beemHandle || '',paymentProfileLinked:true});
+          });
         } else if (response.status !== 404) throw new Error("Connection failed");
       } catch { els.saveStatus.textContent = "Saved on device · waiting for connection"; }
       ready = true;
@@ -1240,7 +1232,6 @@
       renderSettlements();
       renderHistory();
       applyAccess();
-      renderPaymentSection();
     }
 
     function renderPlayers() {
@@ -1260,7 +1251,7 @@
           card.innerHTML = `
             <div class="player-row">
               <div>
-                <h3 class="player-name"></h3>
+                <h3><button type="button" class="player-name" data-action="payment" style="padding:0;border:0;background:none;color:inherit;font:inherit;text-align:left;text-decoration:underline;text-underline-offset:4px"></button></h3>
                 <div class="subtle">In ${formatAmount(player.buyIn)} · Out ${formatAmount(player.cashOut)}</div>
                 <div class="subtle cash-paid-line"></div>
                 <div class="subtle payid-line"></div>
@@ -1276,6 +1267,7 @@
               <button type="button" data-action="buyin">+ Buy-in</button>
               <button type="button" data-action="cashout">+ Cash-out</button>
               <button type="button" data-action="edit">Edit</button>
+              <button type="button" data-action="payment">Payment details</button>
             </div>
           `;
           card.querySelector(".player-name").textContent = player.name;
@@ -1287,6 +1279,7 @@
           card.querySelectorAll("button").forEach((button) => {
             button.addEventListener("click", () => {
               const action = button.dataset.action;
+              if (action === "payment") openPaymentDialog(player.id);
               if (action === "edit") openPlayerDialog(player.id);
               if (action === "buyin") openQuickDialog(player.id, "buyIn");
               if (action === "cashout") openQuickDialog(player.id, "cashOut");
@@ -1960,9 +1953,8 @@
       state.players = [];
       state.cashPayments = [];
       state.transactions = [];
-      connectionStatus = "not-connected";
-      document.querySelector("#myGamePlayer").value = "";
-      document.querySelector("#sharePaymentDetails").checked = false;
+      closeDialogs();
+      paymentPlayerId = "";
       auditBaseline = structuredClone(state);
       hostToken = crypto.randomUUID() + crypto.randomUUID();
       localStorage.setItem(`poker-host:${state.sessionId}`, hostToken);
@@ -2014,221 +2006,90 @@
       button.addEventListener("click", closeDialogs);
     });
 
-    async function accountRequest(action, body = {}, host = false) {
-      const response = await fetch('/.netlify/functions/player-account', {
-        method: 'POST', credentials: 'same-origin',
-        headers: {'Content-Type':'application/json', ...(host ? {Authorization:`Bearer ${hostToken}`} : {})},
-        body: JSON.stringify({action,...body})
-      });
+    async function paymentRequest(playerId, details) {
+      const query = new URLSearchParams({gameId:state.sessionId,playerId});
+      const response = await fetch('/.netlify/functions/player-account' + (details ? '' : `?${query}`), details ? {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({gameId:state.sessionId,playerId,revision:paymentRevision,...details})
+      } : {cache:'no-store'});
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Please try again');
+      if (!response.ok) throw new Error(result.error || 'Unable to save details. Please try again.');
       return result;
     }
 
-    function accountMessage(message) {
-      document.querySelector('#playerAccountStatus').textContent = message;
-    }
-
-    function renderPaymentSection() {
-      const signedIn = Boolean(playerAccount);
-      document.querySelector('#playerAccountForm').hidden = signedIn;
-      document.querySelector('#myPaymentForm').hidden = !signedIn;
-      if (!signedIn) return;
-      document.querySelector('#signedInPlayer').textContent = `${playerAccount.displayName} · @${playerAccount.username}`;
-      const select = document.querySelector('#myGamePlayer');
-      const previous = select.value;
-      const signature = JSON.stringify(state.players.map(p => [p.id,p.name]));
-      if (select.dataset.signature !== signature) {
-        select.replaceChildren(new Option('Choose your name', ''));
-        state.players.forEach(player => select.add(new Option(player.name,player.id)));
-        select.value = state.players.some(p=>p.id===previous) ? previous : '';
-        select.dataset.signature = signature;
+    async function openPaymentDialog(playerId) {
+      const player = state.players.find(p=>p.id === playerId);
+      if (!player || !ready || paymentBusy) return;
+      const requestId = ++paymentOpenRequest;
+      paymentPlayerId = playerId;
+      const dialog = document.querySelector('#paymentDialog');
+      document.querySelector('#paymentDialogTitle').textContent = `${player.name}'s payment details`;
+      document.querySelector('#paymentPayId').value = player.payId || '';
+      document.querySelector('#paymentBeem').value = player.beemHandle || '';
+      document.querySelector('#paymentStatus').textContent = 'Loading saved details…';
+      document.querySelector('#paymentSave').disabled = true;
+      document.querySelector('#paymentPayId').disabled = true;
+      document.querySelector('#paymentBeem').disabled = true;
+      dialog.showModal();
+      try {
+        const result = await paymentRequest(playerId);
+        if (requestId !== paymentOpenRequest || !dialog.open) return;
+        paymentRevision = result.revision;
+        document.querySelector('#paymentPayId').value = result.payId;
+        document.querySelector('#paymentBeem').value = result.beemHandle;
+        document.querySelector('#paymentStatus').textContent = '';
+        document.querySelector('#paymentSave').disabled = false;
+        document.querySelector('#paymentPayId').disabled = false;
+        document.querySelector('#paymentBeem').disabled = false;
+      } catch(error) {
+        if (requestId === paymentOpenRequest && dialog.open) document.querySelector('#paymentStatus').textContent = error.message + ' Close and reopen to retry.';
       }
-      select.disabled = paymentBusy || !state.players.length;
-      document.querySelector('#saveMyPaymentDetails').disabled = paymentBusy;
-      const share = document.querySelector('#sharePaymentDetails');
-      share.disabled = paymentBusy || connectionStatus === 'approved';
-      if (connectionStatus === 'approved') share.checked = true;
     }
 
-    function fillMyProfile() {
-      document.querySelector('#myPayId').value = playerAccount?.payId || '';
-      document.querySelector('#myBeemHandle').value = playerAccount?.beemHandle || '';
-      renderPaymentSection();
-    }
-
-    async function initializePlayerAccount() {
-      try {
-        const response = await fetch(`/.netlify/functions/player-account?gameId=${encodeURIComponent(state.sessionId)}`,{credentials:'same-origin',cache:'no-store'});
-        if (response.status === 401) { playerAccount = null; renderPaymentSection(); }
-        else {
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error);
-          playerAccount = result.account;
-          fillMyProfile();
-          const connected = result.connectedPlayerIds?.find(id=>state.players.some(p=>p.id===id));
-          if (connected) {
-            document.querySelector('#myGamePlayer').value = connected;
-            connectionStatus = 'approved';
-            renderPaymentSection();
-          }
-        }
-        await refreshPaymentProfiles();
-      } catch { accountMessage('Player sign-in is temporarily unavailable. Please try again.'); }
-    }
-
-    function setAccountMode(mode) {
-      accountMode = mode;
-      document.querySelector('#accountNameLabel').hidden = mode !== 'register';
-      document.querySelector('#accountName').required = mode === 'register';
-      document.querySelector('#accountSubmit').textContent = mode === 'register' ? 'Create account' : 'Sign in';
-      document.querySelector('#accountPassword').autocomplete = mode === 'register' ? 'new-password' : 'current-password';
-      document.querySelector('#signInTab').setAttribute('aria-pressed',String(mode === 'login'));
-      document.querySelector('#registerTab').setAttribute('aria-pressed',String(mode === 'register'));
-      accountMessage('');
-    }
-
-    async function submitPlayerAccount(event) {
+    document.querySelector('#paymentForm').addEventListener('submit',async event=>{
       event.preventDefault();
-      const button = document.querySelector('#accountSubmit');
-      button.disabled = true;
-      accountMessage(accountMode === 'register' ? 'Creating your account…' : 'Signing in…');
-      try {
-        const result = await accountRequest(accountMode,{
-          username:document.querySelector('#accountUsername').value,
-          password:document.querySelector('#accountPassword').value,
-          displayName:document.querySelector('#accountName').value
-        });
-        playerAccount = result.account;
-        document.querySelector('#accountPassword').value = '';
-        fillMyProfile();
-        accountMessage('Signed in. Add your PayID and Beem username, then choose your name in this game.');
-        await initializePlayerAccount();
-      } catch(error) { accountMessage(error.message); }
-      finally { button.disabled = false; }
-    }
-
-    async function refreshMyConnection() {
-      const playerId = document.querySelector('#myGamePlayer').value;
-      if (!playerAccount || !playerId) return;
-      const result = await accountRequest('connection',{gameId:state.sessionId,playerId});
-      connectionStatus = result.status;
-      renderPaymentSection();
-      if (result.status === 'approved') accountMessage('Connected to this player. Your saved payment details are shared with this game.');
-      if (result.status === 'pending') accountMessage('Payment details saved. Waiting for the host to confirm your player account.');
-      if (result.status === 'rejected') accountMessage('The host declined this connection. Check which player you selected before trying again.');
-      if (result.status === 'unavailable') accountMessage('This player already has another connected account. Choose your own player or ask the host.');
-    }
-
-    async function saveMyPaymentDetails(event) {
-      event.preventDefault();
-      if (!playerAccount || paymentBusy) return;
-      const playerId = document.querySelector('#myGamePlayer').value;
-      const share = document.querySelector('#sharePaymentDetails').checked;
-      if (playerId && !share) { accountMessage('Confirm sharing your payment details with players in this game.'); return; }
-      if (connectionStatus === 'unavailable' && playerId) { accountMessage('Choose your own player; this player has another connected account.'); return; }
+      if (paymentBusy || document.querySelector('#paymentSave').disabled) return;
       paymentBusy = true;
-      renderPaymentSection();
-      accountMessage('Saving your payment details…');
+      document.querySelector('#paymentSave').disabled = true;
+      document.querySelector('#paymentStatus').textContent = 'Saving details…';
       try {
-        const result = await accountRequest('save',{
-          revision:playerAccount.revision,
-          payId:document.querySelector('#myPayId').value,
-          beemHandle:document.querySelector('#myBeemHandle').value
+        const result = await paymentRequest(paymentPlayerId,{
+          payId:document.querySelector('#paymentPayId').value,
+          beemHandle:document.querySelector('#paymentBeem').value
         });
-        playerAccount = result.account;
-        if (playerId) {
-          const linked = await accountRequest('connect',{gameId:state.sessionId,playerId,share});
-          connectionStatus = linked.status;
-          accountMessage(linked.status === 'approved' ? 'Payment details saved and updated in your connected games.' : linked.status === 'unavailable' ? 'Details saved to your account. This player has another connected account.' : 'Payment details saved. Waiting for the host to confirm your player account.');
-        } else accountMessage('Payment details saved to your account. Choose your name in a shared game to connect them.');
-        await refreshPaymentProfiles();
-      } catch(error) { accountMessage(error.message); }
-      finally { paymentBusy = false; renderPaymentSection(); }
-    }
+        const player = state.players.find(p=>p.id === paymentPlayerId);
+        if (player) Object.assign(player,{payId:result.payId,beemHandle:result.beemHandle,paymentProfileLinked:true});
+        paymentRevision = result.revision;
+        // Payment details save separately, so they cannot change game amounts or the financial history.
+        if (auditBaseline) {
+          const previous = auditBaseline.players.find(p=>p.id === paymentPlayerId);
+          if (previous && player) Object.assign(previous,{payId:player.payId,beemHandle:player.beemHandle,paymentProfileLinked:true});
+        }
+        persistLocal();
+        render();
+        document.querySelector('#paymentDialog').close();
+        showToast('Payment details saved');
+      } catch(error) { document.querySelector('#paymentStatus').textContent = error.message; }
+      finally { paymentBusy = false; document.querySelector('#paymentSave').disabled = false; }
+    });
 
     async function refreshPaymentProfiles() {
-      if (!ready || paymentRefreshBusy || document.hidden) return;
+      if (!ready || viewer || paymentRefreshBusy || document.hidden) return;
       paymentRefreshBusy = true;
       try {
-        if (!viewer) {
-          const response = await fetch(`/.netlify/functions/live-game?id=${encodeURIComponent(state.sessionId)}`, {headers:{Authorization:`Bearer ${hostToken}`},cache:'no-store'});
-          if (response.ok) {
-            const remote = await response.json();
-            remote.state.players.forEach(remotePlayer => {
-              const local = state.players.find(p=>p.id===remotePlayer.id);
-              if (local && remotePlayer.paymentProfileLinked) {
-                local.payId = remotePlayer.payId || '';
-                local.beemHandle = remotePlayer.beemHandle || '';
-                local.paymentProfileLinked = true;
-              }
-            });
-            renderPlayers();
-            renderSettlements();
-            applyAccess();
+        const response = await fetch(`/.netlify/functions/live-game?id=${encodeURIComponent(state.sessionId)}`, {headers:{Authorization:`Bearer ${hostToken}`},cache:'no-store'});
+        if (!response.ok) return;
+        const remote = await response.json();
+        remote.state.players.forEach(remotePlayer => {
+          const local = state.players.find(p=>p.id===remotePlayer.id);
+          if (local && remotePlayer.paymentProfileLinked) {
+            Object.assign(local,{payId:remotePlayer.payId || '',beemHandle:remotePlayer.beemHandle || '',paymentProfileLinked:true});
           }
-          const result = await accountRequest('host-requests',{gameId:state.sessionId},true);
-          renderProfileRequests(result.requests);
-        }
-        if (playerAccount && !paymentBusy) await refreshMyConnection();
-      } catch(error) {
-        if (playerAccount && /sign in/i.test(error.message)) { playerAccount = null; renderPaymentSection(); accountMessage(error.message); }
-      } finally { paymentRefreshBusy = false; }
+        });
+        persistLocal();
+        renderPlayers(); renderSettlements(); applyAccess();
+      } catch {} finally { paymentRefreshBusy = false; }
     }
-
-    function renderProfileRequests(requests) {
-      const area = document.querySelector('#paymentProfileRequests');
-      area.replaceChildren();
-      if (!requests.length) return;
-      const heading = document.createElement('h3');
-      heading.textContent = 'Confirm player accounts';
-      area.append(heading);
-      requests.forEach(item => {
-        const row = document.createElement('div');
-        row.className = 'payment-request';
-        const title = document.createElement('div');
-        title.textContent = `${item.displayName} (@${item.username}) wants to connect to ${item.playerName}.`;
-        const note = document.createElement('div');
-        note.className = 'hint';
-        note.textContent = 'Confirm only if you recognise this player. They will control their own payment details.';
-        row.append(title,note);
-        for (const [action,label] of [['approve','Confirm player'],['reject','Decline']]) {
-          const button = document.createElement('button');
-          button.type = 'button'; button.className = 'secondary'; button.textContent = label;
-          button.addEventListener('click',async()=>{
-            row.querySelectorAll('button').forEach(b=>b.disabled=true);
-            try {
-              await accountRequest(action,{gameId:state.sessionId,playerId:item.playerId,accountId:item.accountId},true);
-              accountMessage(action === 'approve' ? `${item.displayName}'s payment account connected.` : 'Connection declined.');
-              await refreshPaymentProfiles();
-            } catch(error) { accountMessage(error.message); row.querySelectorAll('button').forEach(b=>b.disabled=false); }
-          });
-          row.append(button);
-        }
-        area.append(row);
-      });
-    }
-
-    document.querySelector('#signInTab').addEventListener('click',()=>setAccountMode('login'));
-    document.querySelector('#registerTab').addEventListener('click',()=>setAccountMode('register'));
-    document.querySelector('#playerAccountForm').addEventListener('submit',submitPlayerAccount);
-    document.querySelector('#myPaymentForm').addEventListener('submit',saveMyPaymentDetails);
-    document.querySelector('#myGamePlayer').addEventListener('change',async()=>{
-      connectionStatus = 'not-connected';
-      document.querySelector('#sharePaymentDetails').checked = false;
-      accountMessage('');
-      renderPaymentSection();
-      try { await refreshMyConnection(); } catch(error) { accountMessage(error.message); }
-    });
-    document.querySelector('#playerSignOut').addEventListener('click',async()=>{
-      try {
-        await accountRequest('logout'); playerAccount = null; connectionStatus = 'not-connected';
-        document.querySelector('#myGamePlayer').value = '';
-        document.querySelector('#sharePaymentDetails').checked = false;
-        document.querySelector('#myPayId').value = ''; document.querySelector('#myBeemHandle').value = '';
-        renderPaymentSection(); accountMessage('Signed out.');
-      } catch(error) { accountMessage(error.message); }
-    });
 
     document.querySelector("#shareGameBtn").addEventListener("click", async () => {
       if (!viewer) {
@@ -2244,7 +2105,7 @@
     window.addEventListener("online", () => viewer ? refreshViewer() : syncGame());
     document.addEventListener("visibilitychange", () => { if (!document.hidden) viewer ? refreshViewer() : syncGame(); });
     setInterval(() => { if (viewer) refreshViewer(); else if (pending) syncGame(); }, 5000);
-    initializeGame().then(initializePlayerAccount);
+    initializeGame();
     setInterval(refreshPaymentProfiles, 10000);
   </script>
 </body>
