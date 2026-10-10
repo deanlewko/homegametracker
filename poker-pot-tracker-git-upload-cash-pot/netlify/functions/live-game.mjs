@@ -1,3 +1,4 @@
+import { paymentProfilesForGame } from "./_player-profiles.mjs";
 import { getStore } from "@netlify/blobs";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { jsonResponse } from "./_admin-auth.mjs";
@@ -27,11 +28,11 @@ export function cleanState(input, id) {
   };
 }
 export function publicState(state) {
-  return {...state, players: state.players.map(({payId,contactDetails,...player}) => player)};
+  return {...state, players: state.players.map(({payId,contactDetails,...player}) => player.paymentProfileLinked ? {...player,payId} : player)};
 }
 // Conditional writes prevent an older host tab overwriting a newer saved game.
 // Games are snapshots; balances are calculated by the client, never incremented in storage.
-export function createHandler(getGameStore = () => getStore({name:"poker-live-games",consistency:"strong"})) {
+export function createHandler(getGameStore = () => getStore({name:"poker-live-games",consistency:"strong"}), getPaymentState = paymentProfilesForGame) {
   return async request => {
     try {
       if (!["GET","POST"].includes(request.method)) return jsonResponse({error:"Method not allowed"},405);
@@ -49,7 +50,8 @@ export function createHandler(getGameStore = () => getStore({name:"poker-live-ga
       const existing = await store.getWithMetadata(key,{type:"json"});
       if (request.method === "GET") {
         if (!existing) return jsonResponse({error:"Game not found"},404);
-        return jsonResponse({revision:existing.data.revision,state:isHost(existing.data,token) ? existing.data.state : publicState(existing.data.state)});
+        const state = await getPaymentState(existing.data.state);
+        return jsonResponse({revision:existing.data.revision,state:isHost(existing.data,token) ? state : publicState(state)});
       }
       if (!/^[0-9a-f-]{72}$/i.test(token)) return jsonResponse({error:"Host access required"},403);
       if (existing && !isHost(existing.data,token)) return jsonResponse({error:"Only the host can edit"},403);
